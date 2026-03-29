@@ -20,16 +20,15 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
-      - name: Install Readwise CLI
-        run: npm install -g readwise-reader-cli
+      - name: Install tools
+        run: |
+          npm install -g readwise-reader-cli @anthropic-ai/claude-code
+          echo "$(npm config get prefix)/bin" >> $GITHUB_PATH
 
       - name: Authenticate Readwise
         run: readwise login-with-token "${{ secrets.READWISE_TOKEN }}"
-
-      - name: Install Claude Code
-        run: npm install -g @anthropic-ai/claude-code
 
       - name: Generate digest
         env:
