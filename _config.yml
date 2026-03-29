@@ -1,0 +1,15 @@
+title: Reader Digests
+description: Daily reading digests from Readwise Reader
+baseurl: "/reader-digests"
+url: "https://rohitkaulcoder.github.io"
+collections:
+  digests:
+    output: true
+    sort_by: date
+    permalink: /digests/:title/
+defaults:
+  - scope:
+      path: ""
+      type: "digests"
+    values:
+      layout: "digest"
