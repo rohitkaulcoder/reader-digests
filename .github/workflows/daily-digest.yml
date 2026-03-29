@@ -24,7 +24,7 @@ jobs:
 
       - name: Install tools
         run: |
-          npm install -g readwise-reader-cli @anthropic-ai/claude-code
+          npm install -g @readwise/cli @anthropic-ai/claude-code
           echo "$(npm config get prefix)/bin" >> $GITHUB_PATH
 
       - name: Authenticate Readwise
