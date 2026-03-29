@@ -1,0 +1,89 @@
+name: Daily Reader Digest
+
+on:
+  schedule:
+    - cron: '30 1 * * *'  # 1:30 UTC = 7:00 AM IST
+  workflow_dispatch:  # manual trigger
+
+permissions:
+  contents: write
+
+jobs:
+  generate-digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Readwise CLI
+        run: npm install -g readwise-reader-cli
+
+      - name: Authenticate Readwise
+        run: readwise login-with-token "${{ secrets.READWISE_TOKEN }}"
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Generate digest
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          TODAY=$(date +%Y-%m-%d)
+          MONTH_DAY=$(date +"%B %d, %Y")
+          CUTOFF=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+
+          # Check if digest already exists
+          if [ -f "_digests/digest-${TODAY}.md" ]; then
+            echo "Digest for ${TODAY} already exists, skipping."
+            exit 0
+          fi
+
+          claude -p "You are generating a daily reading digest. Follow these steps exactly:
+
+          1. Fetch documents from Readwise Reader updated after ${CUTOFF} from all three locations (new, later, feed). Run each as a separate command:
+             readwise reader-list-documents --location new --updated-after \"${CUTOFF}\" --limit 50 --json
+             readwise reader-list-documents --location later --updated-after \"${CUTOFF}\" --limit 50 --json
+             readwise reader-list-documents --location feed --updated-after \"${CUTOFF}\" --limit 50 --json
+
+          If all return zero results, expand to 48 hours and retry.
+
+          2. Deduplicate by title (keep highest word count). Classify: Substantive (800+ words) vs Brief (<800).
+
+          3. For each document, fetch full content:
+             readwise reader-get-document-details --document-id <id> --json
+             NEVER pipe commands. Run each standalone.
+
+          4. For substantive docs: extract 4-5 key insights (specific, non-obvious, 2-3 sentences with data/frameworks), 2-3 notable quotes, one-line summary.
+             For brief docs: 2-3 sentence summary + one notable detail.
+
+          5. Group by theme. Write the digest in markdown format with sections for each theme.
+
+          6. Save to _digests/digest-${TODAY}.md with this front matter:
+          ---
+          layout: digest
+          title: \"Reader Digest — ${MONTH_DAY}\"
+          date: ${TODAY}
+          ---
+
+          Do NOT include a # h1 title in the body (the layout adds it from front matter title).
+
+          Process EVERY document. Never skip any. Insights must be substantive. NEVER use piped commands." --allowedTools "Bash,Read,Write,Edit,Agent"
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add _digests/
+          if git diff --cached --quiet; then
+            echo "No new digest to commit"
+          else
+            git commit -m "Add digest for $(date +%Y-%m-%d)"
+            git push
+          fi
