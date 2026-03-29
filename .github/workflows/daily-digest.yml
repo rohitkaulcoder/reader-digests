@@ -44,36 +44,62 @@ jobs:
             exit 0
           fi
 
-          claude -p "You are generating a daily reading digest. Follow these steps exactly:
+          claude -p "You are generating a sharp daily reading digest — intelligence briefings, not book reports.
 
+          ## Fetch
           1. Fetch documents from Readwise Reader updated after ${CUTOFF} from all three locations (new, later, feed). Run each as a separate command:
              readwise reader-list-documents --location new --updated-after \"${CUTOFF}\" --limit 50 --json
              readwise reader-list-documents --location later --updated-after \"${CUTOFF}\" --limit 50 --json
              readwise reader-list-documents --location feed --updated-after \"${CUTOFF}\" --limit 50 --json
-
           If all return zero results, expand to 48 hours and retry.
 
           2. Deduplicate by title (keep highest word count). Classify: Substantive (800+ words) vs Brief (<800).
 
           3. For each document, fetch full content:
              readwise reader-get-document-details --document-id <id> --json
-             NEVER pipe commands. Run each standalone.
+             NEVER pipe commands. Run each standalone. Use the Agent tool for parallel batches.
 
-          4. For substantive docs: extract 4-5 key insights (specific, non-obvious, 2-3 sentences with data/frameworks), 2-3 notable quotes, one-line summary.
-             For brief docs: 2-3 sentence summary + one notable detail.
+          ## Analyze
+          For each substantive doc, produce:
+          - **Triage signal**: ⚡ must-read (max 3 per digest), 📌 worth a look, 📎 skim. Be ruthless.
+          - **Why read this** (1-2 sentences): The single most compelling reason to open this. Be specific and punchy.
+          - **Sharp takes** (exactly 3): Lead with surprise ('wait, really?'). Name the mechanism. Include the so-what. When possible, one take should be a tension or disagreement.
+          - **Quotable** (exactly 1): Best quote + italicized context tag (who said it, about what, why it's sharp).
 
-          5. Group by theme. Write the digest in markdown format with sections for each theme.
+          For brief docs: 1 sentence + one data point.
 
-          6. Save to _digests/digest-${TODAY}.md with this front matter:
+          ## Format
+          Start with 'Today's Top 3' section picking the best articles. Then group by theme. Format:
+
+          ### [Title] ⚡/📌/📎
+          **[Author]** · [Source] · [X] min
+
+          **Why read this:** [1-2 sentences]
+
+          **Sharp takes:**
+          - [take 1]
+          - [take 2]
+          - [take 3]
+
+          **Quotable:**
+          > \"[quote]\" — *[context]*
+
+          For briefs: ### [Title] 📎 / **[Author]** · [X] min / [one sentence + data point]
+
+          ## Save
+          Save to _digests/digest-${TODAY}.md with front matter:
           ---
           layout: digest
           title: \"Reader Digest — ${MONTH_DAY}\"
           date: ${TODAY}
           ---
+          Do NOT include a # h1 title in the body.
 
-          Do NOT include a # h1 title in the body (the layout adds it from front matter title).
-
-          Process EVERY document. Never skip any. Insights must be substantive. NEVER use piped commands." --allowedTools "Bash,Read,Write,Edit,Agent"
+          ## Rules
+          - Process EVERY document. Never skip any.
+          - Lead with surprise, not summary. No generic statements.
+          - Max 3 ⚡ per digest. Most articles are 📌 or 📎.
+          - NEVER use piped commands." --allowedTools "Bash,Read,Write,Edit,Agent"
 
       - name: Commit and push
         run: |
