@@ -110,6 +110,7 @@ jobs:
             echo "No new digest to commit"
           else
             git commit -m "Add digest for $(date +%Y-%m-%d)"
+            git pull --rebase
             git push
           fi
 
