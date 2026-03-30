@@ -113,3 +113,59 @@ jobs:
             git push
           fi
 
+      - name: Email digest via Resend
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+        run: |
+          TODAY=$(date +%Y-%m-%d)
+          DIGEST_FILE="_digests/digest-${TODAY}.md"
+
+          if [ ! -f "$DIGEST_FILE" ]; then
+            echo "No digest file for today, skipping email."
+            exit 0
+          fi
+
+          # Strip YAML front matter and convert markdown to basic HTML
+          BODY=$(sed '1{/^---$/!q;};1,/^---$/d' "$DIGEST_FILE" \
+            | python3 -c "
+          import sys, html, re
+          md = sys.stdin.read()
+          # Escape HTML entities
+          md = html.escape(md)
+          # Bold
+          md = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', md)
+          # Italic
+          md = re.sub(r'\*(.+?)\*', r'<em>\1</em>', md)
+          # H3
+          md = re.sub(r'^### (.+)$', r'<h3>\1</h3>', md, flags=re.MULTILINE)
+          # H2
+          md = re.sub(r'^## (.+)$', r'<h2>\1</h2>', md, flags=re.MULTILINE)
+          # Blockquotes
+          md = re.sub(r'^&gt; (.+)$', r'<blockquote>\1</blockquote>', md, flags=re.MULTILINE)
+          # List items
+          md = re.sub(r'^- (.+)$', r'<li>\1</li>', md, flags=re.MULTILINE)
+          # Paragraphs (double newline)
+          md = re.sub(r'\n\n', r'</p><p>', md)
+          # Single newlines to <br>
+          md = re.sub(r'\n', r'<br>', md)
+          print('<div style=\"font-family: -apple-system, sans-serif; max-width: 680px; margin: 0 auto; padding: 20px; line-height: 1.6;\"><p>' + md + '</p></div>')
+          ")
+
+          MONTH_DAY=$(date +"%B %d, %Y")
+
+          curl -s -X POST 'https://api.resend.com/emails' \
+            -H "Authorization: Bearer ${RESEND_API_KEY}" \
+            -H 'Content-Type: application/json' \
+            -d "$(python3 -c "
+          import json, sys
+          body = sys.stdin.read()
+          print(json.dumps({
+            'from': 'Reader Digest <onboarding@resend.dev>',
+            'to': ['rohit@rohitkaul.com'],
+            'subject': 'Reader Digest — ${MONTH_DAY}',
+            'html': body
+          }))
+          " <<< "$BODY")"
+
+          echo "Digest email sent!"
+
