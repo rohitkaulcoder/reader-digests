@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: daily-digest
+  cancel-in-progress: false
+
 jobs:
   generate-digest:
     runs-on: ubuntu-latest
@@ -44,7 +48,7 @@ jobs:
             exit 0
           fi
 
-          claude -p "You are generating a sharp daily reading digest — intelligence briefings, not book reports.
+          claude -p --model sonnet "You are generating a sharp daily reading digest — intelligence briefings, not book reports.
 
           ## Fetch
           1. Fetch documents from Readwise Reader updated after ${CUTOFF} from all three locations (new, later, feed). Run each as a separate command:
