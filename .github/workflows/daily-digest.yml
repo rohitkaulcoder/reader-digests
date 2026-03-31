@@ -31,6 +31,13 @@ jobs:
           npm install -g @readwise/cli @anthropic-ai/claude-code
           echo "$(npm config get prefix)/bin" >> $GITHUB_PATH
 
+      - name: Security check
+        run: |
+          if npm ls -g axios 2>/dev/null | grep -q "plain-crypto-js"; then
+            echo "::error::SUPPLY CHAIN ALERT: axios has compromised dependency plain-crypto-js"
+            exit 1
+          fi
+
       - name: Authenticate Readwise
         run: readwise login-with-token "${{ secrets.READWISE_TOKEN }}"
 
