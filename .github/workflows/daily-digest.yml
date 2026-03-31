@@ -55,7 +55,7 @@ jobs:
             exit 0
           fi
 
-          claude -p --model sonnet --output-format json "You are generating a sharp daily reading digest — intelligence briefings, not book reports.
+          claude -p --model sonnet --output-format json "You are generating a comprehensive daily reading digest. The reader should get ~100% understanding of each article without opening the original.
 
           ## Fetch
           1. Fetch documents from Readwise Reader updated after ${CUTOFF} from all three locations (new, later, feed). Run each as a separate command:
@@ -66,36 +66,38 @@ jobs:
 
           2. Deduplicate by title (keep highest word count). Classify: Substantive (800+ words) vs Brief (<800).
 
-          3. For each document, fetch full content:
+          3. Rank substantive articles by novelty/depth/relevance. Pick top 8-10 for full treatment. Remaining substantive go to 'Also in your inbox' (title + author + 1 sentence).
+
+          4. For each top 8-10 document, fetch full content:
              readwise reader-get-document-details --document-id <id> --json
              NEVER pipe commands. Run each standalone. Use the Agent tool for parallel batches.
 
           ## Analyze
-          For each substantive doc, produce:
+          For each featured doc, produce:
           - **Triage signal**: ⚡ must-read (max 3 per digest), 📌 worth a look, 📎 skim. Be ruthless.
-          - **Why read this** (1-2 sentences): The single most compelling reason to open this. Be specific and punchy.
-          - **Sharp takes** (exactly 3): Lead with surprise ('wait, really?'). Name the mechanism. Include the so-what. When possible, one take should be a tension or disagreement.
-          - **Quotable** (exactly 1): Best quote + italicized context tag (who said it, about what, why it's sharp).
+          - **Numbered arguments** scaled by reading time (~1 per 2 min): 6-min article → ~3, 15-min → ~7, 40-min → ~20. Each argument is 2-3 sentences with specific names, numbers, mechanisms, evidence.
+          - **Quotable** (exactly 1): Best quote + italicized context tag.
+
+          CRITICAL QUALITY RULE: NEVER use meta-commentary. Do NOT write 'the author argues' or 'this piece explores.' State the actual claims, evidence, and conclusions directly.
+          BAD: 'The author explores the tension between biomimicry and pragmatism in robotics.'
+          GOOD: 'Biomimicry may be a red herring — a slower, cruder hand that reliably grasps 90% of warehouse SKUs captures most economic value. Assembly, logistics, and care work do not need human-speed dexterity.'
 
           For brief docs: 1 sentence + one data point.
 
           ## Format
-          Start with 'Today's Top 3' section picking the best articles. Then group by theme. Format:
+          Start with 'Today's Top 3' section. Then group featured articles by theme:
 
           ### [Title] ⚡/📌/📎
           **[Author]** · [Source] · [X] min
 
-          **Why read this:** [1-2 sentences]
-
-          **Sharp takes:**
-          - [take 1]
-          - [take 2]
-          - [take 3]
+          1. [argument — 2-3 sentences, specific substance]
+          2. [argument]
+          ...
 
           **Quotable:**
           > \"[quote]\" — *[context]*
 
-          For briefs: ### [Title] 📎 / **[Author]** · [X] min / [one sentence + data point]
+          Then a 'Briefs' section, then 'Also in Your Inbox' for overflow substantive articles.
 
           ## Save
           Save to _digests/digest-${TODAY}.md with front matter:
@@ -107,8 +109,9 @@ jobs:
           Do NOT include a # h1 title in the body.
 
           ## Rules
-          - Process EVERY document. Never skip any.
-          - Lead with surprise, not summary. No generic statements.
+          - Process EVERY document. Never skip any. Top 8-10 get full arguments, rest go to briefs or overflow.
+          - NEVER use meta-commentary. State the substance directly.
+          - Scale argument count to article length (~1 per 2 min reading time).
           - Max 3 ⚡ per digest. Most articles are 📌 or 📎.
           - NEVER use piped commands." --allowedTools "Bash,Read,Write,Edit,Agent" > /tmp/claude_output.json
 
@@ -187,8 +190,10 @@ jobs:
           md = re.sub(r'^## (.+)$', r'<h2>\1</h2>', md, flags=re.MULTILINE)
           # Blockquotes
           md = re.sub(r'^&gt; (.+)$', r'<blockquote>\1</blockquote>', md, flags=re.MULTILINE)
-          # List items
+          # Unordered list items
           md = re.sub(r'^- (.+)$', r'<li>\1</li>', md, flags=re.MULTILINE)
+          # Ordered list items (numbered arguments)
+          md = re.sub(r'^\d+\. (.+)$', r'<li>\1</li>', md, flags=re.MULTILINE)
           # Paragraphs (double newline)
           md = re.sub(r'\n\n', r'</p><p>', md)
           # Single newlines to <br>
