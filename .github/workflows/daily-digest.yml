@@ -139,7 +139,7 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          claude -p --model sonnet --output-format json "You are triaging articles for a daily reading digest.
+          if ! claude -p --model sonnet --output-format json "You are triaging articles for a daily reading digest.
 
           Read the file /tmp/articles/metadata.json. It contains article metadata (title, author, summary, word_count, category, source_url, published_date, id).
 
@@ -158,7 +158,11 @@ jobs:
           Rules:
           - Max 3 must-read articles. Most should be worth-a-look or skim.
           - Process EVERY document — none should be missing from the output.
-          - Be ruthless in ranking. Novelty and depth beat recency." --allowedTools "Read,Write" > /tmp/stage1_output.json
+          - Be ruthless in ranking. Novelty and depth beat recency." --allowedTools "Read,Write" > /tmp/stage1_output.json 2>&1; then
+            echo "::error::Stage 1 claude -p failed. Output:"
+            cat /tmp/stage1_output.json 2>/dev/null || echo "(no output file)"
+            exit 1
+          fi
 
           echo "Stage 1 complete"
           python3 -c "
@@ -211,7 +215,7 @@ jobs:
           TODAY=$(date +%Y-%m-%d)
           MONTH_DAY=$(date +"%B %d, %Y")
 
-          claude -p --model sonnet --output-format json "You are generating a comprehensive daily reading digest. The reader should get ~100% understanding of each article without opening the original.
+          if ! claude -p --model sonnet --output-format json "You are generating a comprehensive daily reading digest. The reader should get ~100% understanding of each article without opening the original.
 
           ## Input files
           - /tmp/articles/triage.json — contains the triage results with featured, briefs, and overflow articles.
@@ -261,7 +265,11 @@ jobs:
           - Process EVERY document from triage.json. None should be missing.
           - NEVER use meta-commentary. State the substance directly.
           - Scale argument count to article length (~1 per 2 min reading time).
-          - Max 3 ⚡ per digest." --allowedTools "Read,Write" > /tmp/stage2_output.json
+          - Max 3 ⚡ per digest." --allowedTools "Read,Write" > /tmp/stage2_output.json 2>&1; then
+            echo "::error::Stage 2 claude -p failed. Output:"
+            cat /tmp/stage2_output.json 2>/dev/null || echo "(no output file)"
+            exit 1
+          fi
 
           # Combine cost stats from both stages
           python3 -c "
