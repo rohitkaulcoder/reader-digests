@@ -8,10 +8,15 @@ Daily reading digest generated from [Readwise Reader](https://readwise.io/read) 
 
 A GitHub Actions workflow runs daily at **7:00 AM IST**, triggered externally by [cron-job.org](https://cron-job.org) via `workflow_dispatch`. The GitHub Actions built-in cron schedule has been removed to prevent duplicate runs.
 
-1. **Fetch** — Pulls recent documents from Readwise Reader (new, later, feed) via `@readwise/cli`
-2. **Analyze** — Claude (`claude -p`) reads each article and produces triage signals, sharp takes, and quotable excerpts
-3. **Publish** — Commits the digest to `_digests/`, which Jekyll serves on GitHub Pages
-4. **Email** — Sends the digest as a formatted HTML email via Resend API
+1. **Fetch** — Pulls recent documents from Readwise Reader feed via `@readwise/cli`, strips to slim metadata
+2. **Stage 1 (Haiku)** — Triages ~30-50 articles, picks top 10 by novelty/depth
+3. **Fetch full content** — Downloads full markdown for the top 10 articles only
+4. **Stage 2 (Sonnet)** — Analyzes each article in isolated `claude -p` calls (context resets between articles to control cost)
+5. **Stage 3 (Haiku)** — Assembles analyses into the final digest with Top 3, themed sections, and signals
+6. **Publish** — Commits the digest to `_digests/`, which Jekyll serves on GitHub Pages
+7. **Email** — Sends the digest as a formatted HTML email via Resend API
+
+**Cost:** ~$1/run (~$30/month) using Sonnet for analysis quality, Haiku for mechanical tasks.
 
 ## Digest format
 
