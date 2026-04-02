@@ -1,9 +1,7 @@
 name: Daily Reader Digest
 
 on:
-  schedule:
-    - cron: '30 1 * * *'  # 1:30 UTC = 7:00 AM IST
-  workflow_dispatch:  # manual trigger
+  workflow_dispatch:  # triggered externally by cron-job.org
 
 permissions:
   contents: write
