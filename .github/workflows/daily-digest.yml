@@ -56,7 +56,7 @@ jobs:
           KEEP_FIELDS='["id","title","author","summary","word_count","reading_time","category","source_url","published_date"]'
 
           # Fetch from all three locations, strip to slim metadata
-          for loc in new later feed; do
+          for loc in feed; do
             readwise reader-list-documents \
               --location "$loc" \
               --updated-after "$CUTOFF" \
@@ -81,7 +81,7 @@ jobs:
           python3 -c "
           import json, os
           seen = {}
-          for loc in ['new', 'later', 'feed']:
+          for loc in ['feed']:
               path = f'/tmp/articles/list_{loc}.json'
               if os.path.exists(path):
                   for d in json.load(open(path)):
@@ -99,7 +99,7 @@ jobs:
           if [ "$DOC_COUNT" = "0" ]; then
             echo "No docs in 24h window, expanding to 48h..."
             CUTOFF=$(date -u -d '48 hours ago' +%Y-%m-%dT%H:%M:%SZ)
-            for loc in new later feed; do
+            for loc in feed; do
               readwise reader-list-documents \
                 --location "$loc" \
                 --updated-after "$CUTOFF" \
@@ -120,7 +120,7 @@ jobs:
             python3 -c "
           import json, os
           seen = {}
-          for loc in ['new', 'later', 'feed']:
+          for loc in ['feed']:
               path = f'/tmp/articles/list_{loc}.json'
               if os.path.exists(path):
                   for d in json.load(open(path)):
