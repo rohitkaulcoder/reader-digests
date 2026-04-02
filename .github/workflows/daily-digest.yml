@@ -53,43 +53,45 @@ jobs:
           CUTOFF=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ)
           mkdir -p /tmp/articles
 
-          # Fetch slim metadata from all three locations (no html_content!)
+          KEEP_FIELDS='["id","title","author","summary","word_count","reading_time","category","source_url","published_date"]'
+
+          # Fetch from all three locations, strip to slim metadata
           for loc in new later feed; do
             readwise reader-list-documents \
               --location "$loc" \
               --updated-after "$CUTOFF" \
               --limit 50 \
-              --json \
-              --response-fields title \
-              --response-fields author \
-              --response-fields summary \
-              --response-fields word_count \
-              --response-fields reading_time \
-              --response-fields category \
-              --response-fields source_url \
-              --response-fields published_date > "/tmp/articles/list_${loc}.json"
-            echo "Fetched $loc: $(python3 -c "import json; print(len(json.load(open('/tmp/articles/list_${loc}.json'))))" 2>/dev/null || echo 0) docs"
+              --json > "/tmp/articles/raw_${loc}.json"
+
+            # Strip to slim fields (drops html_content, 42KB→600B per doc)
+            python3 -c "
+          import json
+          keep = set(json.loads('${KEEP_FIELDS}'))
+          raw = json.load(open('/tmp/articles/raw_${loc}.json'))
+          docs = raw.get('results', raw) if isinstance(raw, dict) else raw
+          if not isinstance(docs, list): docs = []
+          slim = [{k: d.get(k) for k in keep} for d in docs]
+          for d in slim: d['location'] = '${loc}'
+          json.dump(slim, open('/tmp/articles/list_${loc}.json', 'w'), indent=2)
+          print(f'Fetched ${loc}: {len(slim)} docs')
+          "
           done
 
-          # Merge, deduplicate, and create a single metadata file
+          # Merge, deduplicate by title (keep highest word count)
           python3 -c "
           import json, os
-          all_docs = []
-          seen_titles = {}
+          seen = {}
           for loc in ['new', 'later', 'feed']:
               path = f'/tmp/articles/list_{loc}.json'
               if os.path.exists(path):
-                  docs = json.load(open(path))
-                  for d in docs:
-                      d['location'] = loc
-                      title = d.get('title', '')
-                      wc = d.get('word_count', 0) or 0
-                      if title not in seen_titles or wc > seen_titles[title].get('word_count', 0):
-                          seen_titles[title] = d
-          all_docs = list(seen_titles.values())
+                  for d in json.load(open(path)):
+                      title = d.get('title') or ''
+                      wc = d.get('word_count') or 0
+                      if title and (title not in seen or wc > (seen[title].get('word_count') or 0)):
+                          seen[title] = d
+          all_docs = list(seen.values())
           print(f'Total unique docs: {len(all_docs)}')
-          with open('/tmp/articles/metadata.json', 'w') as f:
-              json.dump(all_docs, f, indent=2)
+          json.dump(all_docs, open('/tmp/articles/metadata.json', 'w'), indent=2)
           "
 
           # If no docs found, try 48-hour window
@@ -102,34 +104,33 @@ jobs:
                 --location "$loc" \
                 --updated-after "$CUTOFF" \
                 --limit 50 \
-                --json \
-                --response-fields title \
-                --response-fields author \
-                --response-fields summary \
-                --response-fields word_count \
-                --response-fields reading_time \
-                --response-fields category \
-                --response-fields source_url \
-                --response-fields published_date > "/tmp/articles/list_${loc}.json"
+                --json > "/tmp/articles/raw_${loc}.json"
+
+              python3 -c "
+          import json
+          keep = set(json.loads('${KEEP_FIELDS}'))
+          raw = json.load(open('/tmp/articles/raw_${loc}.json'))
+          docs = raw.get('results', raw) if isinstance(raw, dict) else raw
+          if not isinstance(docs, list): docs = []
+          slim = [{k: d.get(k) for k in keep} for d in docs]
+          for d in slim: d['location'] = '${loc}'
+          json.dump(slim, open('/tmp/articles/list_${loc}.json', 'w'), indent=2)
+          "
             done
             python3 -c "
           import json, os
-          all_docs = []
-          seen_titles = {}
+          seen = {}
           for loc in ['new', 'later', 'feed']:
               path = f'/tmp/articles/list_{loc}.json'
               if os.path.exists(path):
-                  docs = json.load(open(path))
-                  for d in docs:
-                      d['location'] = loc
-                      title = d.get('title', '')
-                      wc = d.get('word_count', 0) or 0
-                      if title not in seen_titles or wc > seen_titles[title].get('word_count', 0):
-                          seen_titles[title] = d
-          all_docs = list(seen_titles.values())
+                  for d in json.load(open(path)):
+                      title = d.get('title') or ''
+                      wc = d.get('word_count') or 0
+                      if title and (title not in seen or wc > (seen[title].get('word_count') or 0)):
+                          seen[title] = d
+          all_docs = list(seen.values())
           print(f'Total unique docs (48h): {len(all_docs)}')
-          with open('/tmp/articles/metadata.json', 'w') as f:
-              json.dump(all_docs, f, indent=2)
+          json.dump(all_docs, open('/tmp/articles/metadata.json', 'w'), indent=2)
           "
           fi
 
