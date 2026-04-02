@@ -134,32 +134,28 @@ jobs:
           "
           fi
 
-      - name: "Stage 1: Triage & rank (Sonnet — small context)"
+      - name: "Stage 1: Triage & rank (Haiku — pick top 10)"
         if: env.SKIP_DIGEST != 'true'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          if ! claude -p --model sonnet --output-format json "You are triaging articles for a daily reading digest.
+          if ! claude -p --model haiku --output-format json "You are triaging articles for a daily reading digest. Your ONLY job is to pick the top 10 most interesting articles.
 
-          Read the file /tmp/articles/metadata.json. It contains article metadata (title, author, summary, word_count, category, source_url, published_date, id).
+          Read /tmp/articles/metadata.json. It contains article metadata (title, author, summary, word_count, category, source_url, published_date, id).
 
-          Your job:
-          1. Classify each article: Substantive (word_count >= 800) vs Brief (< 800).
-          2. Rank substantive articles by novelty, depth, and relevance.
-          3. Select the top 8-10 for full treatment. The rest are overflow.
+          Pick the top 10 articles ranked by novelty, depth, and relevance. Ignore articles with word_count < 300.
 
-          Write your output to /tmp/articles/triage.json with this exact structure:
-          {
-            \"featured\": [{\"id\": \"...\", \"title\": \"...\", \"author\": \"...\", \"word_count\": N, \"reading_time\": \"...\", \"category\": \"...\", \"source_url\": \"...\", \"summary\": \"...\", \"signal\": \"must-read|worth-a-look|skim\"}],
-            \"briefs\": [{\"id\": \"...\", \"title\": \"...\", \"author\": \"...\", \"summary\": \"...\", \"word_count\": N}],
-            \"overflow\": [{\"id\": \"...\", \"title\": \"...\", \"author\": \"...\", \"summary\": \"...\"}]
-          }
+          Write to /tmp/articles/top10.json with this exact structure:
+          [
+            {\"id\": \"...\", \"title\": \"...\", \"author\": \"...\", \"word_count\": N, \"reading_time\": \"...\", \"category\": \"...\", \"source_url\": \"...\", \"summary\": \"...\", \"rank\": 1},
+            ...
+          ]
 
           Rules:
-          - Max 3 must-read articles. Most should be worth-a-look or skim.
-          - Process EVERY document — none should be missing from the output.
-          - Be ruthless in ranking. Novelty and depth beat recency." --allowedTools "Read,Write" > /tmp/stage1_output.json 2>&1; then
-            echo "::error::Stage 1 claude -p failed. Output:"
+          - Exactly 10 articles (or fewer if less than 10 available).
+          - rank 1 = most interesting. Novelty and depth beat recency.
+          - Output ONLY the JSON file. Nothing else." --allowedTools "Read,Write" > /tmp/stage1_output.json 2>&1; then
+            echo "::error::Stage 1 (triage) failed. Output:"
             cat /tmp/stage1_output.json 2>/dev/null || echo "(no output file)"
             exit 1
           fi
@@ -167,47 +163,145 @@ jobs:
           echo "Stage 1 complete"
           python3 -c "
           import json
-          with open('/tmp/stage1_output.json') as f:
-              data = json.load(f)
+          data = json.load(open('/tmp/stage1_output.json'))
           u = data.get('usage', {})
-          inp = u.get('input_tokens', 0)
-          out = u.get('output_tokens', 0)
-          cost = (inp / 1e6) * 3.0 + (out / 1e6) * 15.0
-          print(f'Stage 1: {inp:,} in / {out:,} out | \${cost:.2f}')
-          with open('/tmp/stage1_cost.txt', 'w') as f:
-              f.write(f'Stage 1: {inp:,} in / {out:,} out | \${cost:.2f}')
+          inp, out = u.get('input_tokens', 0), u.get('output_tokens', 0)
+          cost = (inp / 1e6) * 0.80 + (out / 1e6) * 4.0
+          print(f'Stage 1 (Haiku): {inp:,} in / {out:,} out | \${cost:.4f}')
           " || echo "Could not parse stage 1 stats"
 
-      - name: Fetch full content for featured articles
+          # Verify top10.json exists and show count
+          python3 -c "
+          import json
+          top10 = json.load(open('/tmp/articles/top10.json'))
+          print(f'Selected {len(top10)} articles for analysis')
+          for a in top10:
+              print(f'  #{a.get(\"rank\",\"?\")} {a[\"title\"][:60]}')
+          "
+
+      - name: Fetch full content for top 10 articles
         if: env.SKIP_DIGEST != 'true'
         run: |
-          # Extract featured article IDs and fetch full content
           python3 -c "
-          import json, subprocess, os
-          triage = json.load(open('/tmp/articles/triage.json'))
-          featured = triage.get('featured', [])
-          print(f'Fetching full content for {len(featured)} featured articles...')
-          for i, article in enumerate(featured):
+          import json, subprocess
+          top10 = json.load(open('/tmp/articles/top10.json'))
+          print(f'Fetching full content for {len(top10)} articles...')
+          for i, article in enumerate(top10):
               doc_id = article['id']
-              print(f'  [{i+1}/{len(featured)}] {article.get(\"title\", doc_id)[:60]}...')
+              print(f'  [{i+1}/{len(top10)}] {article.get(\"title\", doc_id)[:60]}...')
               result = subprocess.run(
                   ['readwise', 'reader-get-document-details', '--document-id', doc_id, '--json'],
                   capture_output=True, text=True, timeout=30
               )
               if result.returncode == 0:
                   details = json.loads(result.stdout)
-                  # Save just the markdown content to a file
                   content = details.get('content', '')
                   with open(f'/tmp/articles/{doc_id}.md', 'w') as f:
                       f.write(content)
-                  size_kb = len(content) / 1024
-                  print(f'    Saved {size_kb:.0f} KB')
+                  print(f'    Saved {len(content)/1024:.0f} KB')
               else:
                   print(f'    FAILED: {result.stderr[:100]}')
-          print('All featured articles fetched.')
           "
 
-      - name: "Stage 2: Generate digest (Sonnet — reads files individually)"
+      - name: "Stage 2: Analyze each article (Sonnet — isolated calls)"
+        if: env.SKIP_DIGEST != 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          # Process each article in its own claude -p call (context resets between articles)
+          python3 << 'PYTHON_SCRIPT'
+          import json, subprocess, os
+
+          top10 = json.load(open('/tmp/articles/top10.json'))
+          total_cost = 0
+
+          # Initialize the analyzed output file
+          with open('/tmp/articles/analyzed.md', 'w') as f:
+              f.write('')
+
+          for i, article in enumerate(top10):
+              doc_id = article['id']
+              title = article.get('title', 'Untitled')
+              author = article.get('author', 'Unknown')
+              reading_time = article.get('reading_time', '')
+              category = article.get('category', '')
+              rank = article.get('rank', i + 1)
+              content_path = f'/tmp/articles/{doc_id}.md'
+
+              if not os.path.exists(content_path):
+                  print(f'  [{i+1}/{len(top10)}] SKIP (no content): {title[:60]}')
+                  continue
+
+              print(f'  [{i+1}/{len(top10)}] Analyzing: {title[:60]}...')
+
+              prompt = f'''Analyze this article for a reading digest. The reader should get ~100% understanding without opening the original.
+
+          Article metadata:
+          - Title: {title}
+          - Author: {author}
+          - Reading time: {reading_time}
+          - Category: {category}
+          - Rank: {rank} of {len(top10)}
+
+          Read the article from {content_path}.
+
+          Produce this output and write it to /tmp/articles/{doc_id}_analysis.md:
+
+          ### {title}
+          **{author}** · {category} · {reading_time}
+
+          [Numbered arguments scaled by reading time (~1 per 2 min). Each argument is 2-3 sentences with specific names, numbers, mechanisms, evidence.]
+
+          **Quotable:**
+          > "[best quote from the article]" — *[context]*
+
+          ---
+
+          CRITICAL RULES:
+          - NEVER use meta-commentary. Do NOT write "the author argues" or "this piece explores." State actual claims, evidence, and conclusions directly.
+          - BAD: "The author explores the tension between biomimicry and pragmatism."
+          - GOOD: "Biomimicry may be a red herring — a slower, cruder hand that reliably grasps 90% of warehouse SKUs captures most economic value."
+          - Scale arguments to length: 5-min article → 2-3, 10-min → 5, 20-min → 10.
+          - Include specific numbers, names, and evidence. No vague summaries.'''
+
+              result = subprocess.run(
+                  ['claude', '-p', '--model', 'sonnet', '--output-format', 'json',
+                   prompt, '--allowedTools', 'Read,Write'],
+                  capture_output=True, text=True, timeout=300
+              )
+
+              if result.returncode == 0:
+                  try:
+                      output = json.loads(result.stdout)
+                      u = output.get('usage', {})
+                      inp = u.get('input_tokens', 0)
+                      out = u.get('output_tokens', 0)
+                      cr = u.get('cache_read_input_tokens', 0)
+                      cc = u.get('cache_creation_input_tokens', 0)
+                      cost = (inp / 1e6) * 3.0 + (out / 1e6) * 15.0 + (cr / 1e6) * 0.30 + (cc / 1e6) * 3.75
+                      total_cost += cost
+                      print(f'    Done: {inp:,} in / {out:,} out | ${cost:.3f}')
+                  except:
+                      print(f'    Done (could not parse stats)')
+
+                  # Append analysis to combined file
+                  analysis_path = f'/tmp/articles/{doc_id}_analysis.md'
+                  if os.path.exists(analysis_path):
+                      with open(analysis_path) as af:
+                          analysis = af.read()
+                      with open('/tmp/articles/analyzed.md', 'a') as f:
+                          f.write(analysis + '\n\n')
+                  else:
+                      print(f'    WARNING: analysis file not created')
+              else:
+                  print(f'    FAILED: {result.stderr[:200]}')
+
+          print(f'\nStage 2 total cost: ${total_cost:.2f}')
+          with open('/tmp/stage2_cost.txt', 'w') as f:
+              f.write(f'Stage 2 (Sonnet x{len(top10)}): ${total_cost:.2f}')
+          PYTHON_SCRIPT
+
+      - name: "Stage 3: Assemble digest (Haiku — formatting only)"
         if: env.SKIP_DIGEST != 'true'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -215,89 +309,81 @@ jobs:
           TODAY=$(date +%Y-%m-%d)
           MONTH_DAY=$(date +"%B %d, %Y")
 
-          if ! claude -p --model sonnet --output-format json "You are generating a comprehensive daily reading digest. The reader should get ~100% understanding of each article without opening the original.
+          if ! claude -p --model haiku --output-format json "You are assembling a daily reading digest from pre-analyzed articles.
 
-          ## Input files
-          - /tmp/articles/triage.json — contains the triage results with featured, briefs, and overflow articles.
-          - /tmp/articles/<id>.md — full markdown content for each featured article (use the id from triage.json).
+          Read /tmp/articles/analyzed.md — it contains individual article analyses already written by an expert reviewer.
+          Read /tmp/articles/top10.json — it contains the article rankings.
 
-          ## Instructions
-          1. Read /tmp/articles/triage.json to get the article list and triage signals.
-          2. For each featured article, read its content from /tmp/articles/<id>.md.
-          3. After reading EACH article, immediately produce its digest entry before reading the next one. This keeps your working memory focused.
+          Your job is ONLY formatting and assembly. Do NOT rewrite or alter the analysis content.
 
-          ## Analysis (for each featured article)
-          - **Triage signal**: Use the signal from triage.json (⚡ must-read, 📌 worth a look, 📎 skim).
-          - **Numbered arguments** scaled by reading time (~1 per 2 min): 6-min article → ~3, 15-min → ~7, 40-min → ~20. Each argument is 2-3 sentences with specific names, numbers, mechanisms, evidence.
-          - **Quotable** (exactly 1): Best quote + italicized context tag.
+          Instructions:
+          1. Pick the top 3 articles (rank 1-3) for the 'Today's Top 3' section. Add ⚡ signal to these.
+          2. Add 📌 signal to ranks 4-7, 📎 signal to ranks 8-10.
+          3. Group all articles by theme (e.g., AI, Finance, Tech Policy). If no clear theme, use 'Also Notable'.
+          4. Insert the signal emoji after each article title in the analysis.
 
-          CRITICAL QUALITY RULE: NEVER use meta-commentary. Do NOT write 'the author argues' or 'this piece explores.' State the actual claims, evidence, and conclusions directly.
-          BAD: 'The author explores the tension between biomimicry and pragmatism in robotics.'
-          GOOD: 'Biomimicry may be a red herring — a slower, cruder hand that reliably grasps 90% of warehouse SKUs captures most economic value.'
-
-          For brief docs (from briefs list): 1 sentence + one data point.
-
-          ## Format
-          Start with 'Today's Top 3' section (the 3 must-read articles). Then group featured articles by theme:
-
-          ### [Title] ⚡/📌/📎
-          **[Author]** · [Source] · [X] min
-
-          1. [argument — 2-3 sentences, specific substance]
-          2. [argument]
-          ...
-
-          **Quotable:**
-          > \"[quote]\" — *[context]*
-
-          Then a 'Briefs' section, then 'Also in Your Inbox' for overflow substantive articles (title + author + 1 sentence).
-
-          ## Save
-          Save the final digest to _digests/digest-${TODAY}.md with front matter:
+          Save to _digests/digest-${TODAY}.md with this front matter:
           ---
           layout: digest
           title: \"Reader Digest — ${MONTH_DAY}\"
           date: ${TODAY}
           ---
-          Do NOT include a # h1 title in the body.
 
-          ## Rules
-          - Process EVERY document from triage.json. None should be missing.
-          - NEVER use meta-commentary. State the substance directly.
-          - Scale argument count to article length (~1 per 2 min reading time).
-          - Max 3 ⚡ per digest." --allowedTools "Read,Write" > /tmp/stage2_output.json 2>&1; then
-            echo "::error::Stage 2 claude -p failed. Output:"
-            cat /tmp/stage2_output.json 2>/dev/null || echo "(no output file)"
+          Start the body with:
+          ## Today's Top 3
+          [the 3 must-read articles with their full analysis]
+
+          Then themed sections with the remaining articles.
+
+          Do NOT include a # h1 title. Do NOT add any content beyond what is in analyzed.md." --allowedTools "Read,Write" > /tmp/stage3_output.json 2>&1; then
+            echo "::error::Stage 3 (assembly) failed. Output:"
+            cat /tmp/stage3_output.json 2>/dev/null || echo "(no output file)"
             exit 1
           fi
 
-          # Combine cost stats from both stages
+          echo "Stage 3 complete"
+
+          # Calculate total cost across all stages
           python3 -c "
           import json, os
-          total_in = 0
-          total_out = 0
-          total_cache_read = 0
           total_cost = 0
-          for stage_file in ['/tmp/stage1_output.json', '/tmp/stage2_output.json']:
-              if os.path.exists(stage_file):
-                  data = json.load(open(stage_file))
-                  u = data.get('usage', {})
-                  inp = u.get('input_tokens', 0)
-                  out = u.get('output_tokens', 0)
-                  cr = u.get('cache_read_input_tokens', 0)
-                  cc = u.get('cache_creation_input_tokens', 0)
-                  total_in += inp
-                  total_out += out
-                  total_cache_read += cr
-                  # Sonnet pricing
-                  total_cost += (inp / 1e6) * 3.0 + (out / 1e6) * 15.0 + (cr / 1e6) * 0.30 + (cc / 1e6) * 3.75
-          stats = f'Tokens: {total_in:,} in / {total_out:,} out'
-          if total_cache_read: stats += f' / {total_cache_read:,} cache read'
-          print(f'{stats} | Cost: \${total_cost:.2f}')
+          stages = []
+
+          # Stage 1 (Haiku)
+          if os.path.exists('/tmp/stage1_output.json'):
+              d = json.load(open('/tmp/stage1_output.json'))
+              u = d.get('usage', {})
+              inp, out = u.get('input_tokens', 0), u.get('output_tokens', 0)
+              c = (inp / 1e6) * 0.80 + (out / 1e6) * 4.0
+              total_cost += c
+              stages.append(f'S1(Haiku): \${c:.3f}')
+
+          # Stage 2 (Sonnet per-article) — read from cost file
+          if os.path.exists('/tmp/stage2_cost.txt'):
+              s2 = open('/tmp/stage2_cost.txt').read()
+              # Extract dollar amount
+              import re
+              m = re.search(r'\\\$([0-9.]+)', s2)
+              if m:
+                  c2 = float(m.group(1))
+                  total_cost += c2
+                  stages.append(f'S2(Sonnet): \${c2:.2f}')
+
+          # Stage 3 (Haiku)
+          if os.path.exists('/tmp/stage3_output.json'):
+              d = json.load(open('/tmp/stage3_output.json'))
+              u = d.get('usage', {})
+              inp, out = u.get('input_tokens', 0), u.get('output_tokens', 0)
+              c = (inp / 1e6) * 0.80 + (out / 1e6) * 4.0
+              total_cost += c
+              stages.append(f'S3(Haiku): \${c:.3f}')
+
+          summary = ' | '.join(stages) + f' | Total: \${total_cost:.2f}'
+          print(summary)
           with open('/tmp/digest_cost.txt', 'w') as f:
-              f.write(f'{stats} | Cost: \${total_cost:.2f}')
+              f.write(summary)
           with open(os.environ.get('GITHUB_ENV', '/dev/null'), 'a') as env:
-              env.write(f'COST_LINE={stats} | Cost: \${total_cost:.2f}\n')
+              env.write(f'COST_LINE={summary}\n')
           " || echo "Could not parse usage stats"
 
       - name: Commit and push
