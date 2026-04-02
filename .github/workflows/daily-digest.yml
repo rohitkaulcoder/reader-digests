@@ -143,7 +143,7 @@ jobs:
 
           Read /tmp/articles/metadata.json. It contains article metadata (title, author, summary, word_count, category, source_url, published_date, id).
 
-          Pick the top 10 articles ranked by novelty, depth, and relevance. Ignore articles with word_count < 300.
+          Pick the top 10 articles ranked by novelty, depth, and relevance. Ignore articles with word_count < 300 or word_count > 15000 (books/very long reads don't belong in a daily digest).
 
           Write to /tmp/articles/top10.json with this exact structure:
           [
@@ -232,6 +232,12 @@ jobs:
                   print(f'  [{i+1}/{len(top10)}] SKIP (no content): {title[:60]}')
                   continue
 
+              # Skip very large files (books etc that slipped through triage)
+              content_size = os.path.getsize(content_path)
+              if content_size > 200_000:  # ~200KB = ~50K words
+                  print(f'  [{i+1}/{len(top10)}] SKIP (too large: {content_size/1024:.0f}KB): {title[:60]}')
+                  continue
+
               print(f'  [{i+1}/{len(top10)}] Analyzing: {title[:60]}...')
 
               prompt = f'''Analyze this article for a reading digest. The reader should get ~100% understanding without opening the original.
@@ -264,11 +270,15 @@ jobs:
           - Scale arguments to length: 5-min article → 2-3, 10-min → 5, 20-min → 10.
           - Include specific numbers, names, and evidence. No vague summaries.'''
 
-              result = subprocess.run(
-                  ['claude', '-p', '--model', 'sonnet', '--output-format', 'json',
-                   prompt, '--allowedTools', 'Read,Write'],
-                  capture_output=True, text=True, timeout=300
-              )
+              try:
+                  result = subprocess.run(
+                      ['claude', '-p', '--model', 'sonnet', '--output-format', 'json',
+                       prompt, '--allowedTools', 'Read,Write'],
+                      capture_output=True, text=True, timeout=300
+                  )
+              except subprocess.TimeoutExpired:
+                  print(f'    TIMEOUT (300s) — skipping')
+                  continue
 
               if result.returncode == 0:
                   try:
@@ -294,7 +304,9 @@ jobs:
                   else:
                       print(f'    WARNING: analysis file not created')
               else:
-                  print(f'    FAILED: {result.stderr[:200]}')
+                  errmsg = result.stderr[:200] if result.stderr else result.stdout[:200]
+                  print(f'    FAILED (exit {result.returncode}): {errmsg}')
+                  # Don't crash — continue to next article
 
           print(f'\nStage 2 total cost: ${total_cost:.2f}')
           with open('/tmp/stage2_cost.txt', 'w') as f:
