@@ -134,6 +134,54 @@ jobs:
           "
           fi
 
+      - name: Pre-sanitize metadata
+        if: env.SKIP_DIGEST != 'true'
+        run: |
+          python3 << 'SANITIZE_SCRIPT'
+          import json
+
+          with open('/tmp/articles/metadata.json') as f:
+              docs = json.load(f)
+
+          for doc in docs:
+              summary = doc.get('summary')
+              if isinstance(summary, str):
+                  # Replace problematic characters that break JSON when re-serialized
+                  summary = summary.replace('\r\n', ' ').replace('\r', ' ')
+                  summary = summary.replace('\t', ' ')
+                  # Collapse runs of whitespace
+                  summary = ' '.join(summary.split())
+                  # Remove unmatched/stray double quotes that could break JSON structure
+                  # Keep quotes only if they appear in balanced pairs
+                  cleaned = []
+                  in_quote = False
+                  for ch in summary:
+                      if ch == '"':
+                          if not in_quote:
+                              in_quote = True
+                              cleaned.append('\u201c')  # left curly quote
+                          else:
+                              in_quote = False
+                              cleaned.append('\u201d')  # right curly quote
+                      else:
+                          cleaned.append(ch)
+                  # If we ended inside a quote, close it
+                  if in_quote:
+                      cleaned.append('\u201d')
+                  doc['summary'] = ''.join(cleaned)
+
+              title = doc.get('title')
+              if isinstance(title, str):
+                  title = title.replace('\r\n', ' ').replace('\r', ' ').replace('\t', ' ')
+                  title = ' '.join(title.split())
+                  doc['title'] = title
+
+          with open('/tmp/articles/metadata.json', 'w') as f:
+              json.dump(docs, f, indent=2, ensure_ascii=False)
+
+          print(f'Sanitized metadata for {len(docs)} articles')
+          SANITIZE_SCRIPT
+
       - name: "Stage 1: Triage & rank (Haiku — pick top 10)"
         if: env.SKIP_DIGEST != 'true'
         env:
@@ -155,8 +203,12 @@ jobs:
           - Exactly 10 articles (or fewer if less than 10 available).
           - rank 1 = most interesting. Novelty and depth beat recency.
           - Output ONLY the JSON file. Nothing else." --allowedTools "Read,Write" > /tmp/stage1_output.json 2>&1; then
-            echo "::error::Stage 1 (triage) failed. Output:"
+            echo "::error::Stage 1 (triage) failed. Claude output:"
             cat /tmp/stage1_output.json 2>/dev/null || echo "(no output file)"
+            if [ -f /tmp/articles/top10.json ]; then
+              echo "::warning::top10.json exists but stage failed. First 1000 chars:"
+              head -c 1000 /tmp/articles/top10.json
+            fi
             exit 1
           fi
 
@@ -170,7 +222,42 @@ jobs:
           print(f'Stage 1 (Haiku): {inp:,} in / {out:,} out | \${cost:.4f}')
           " || echo "Could not parse stage 1 stats"
 
-          # Verify top10.json exists and show count
+          # Verify top10.json is valid JSON; retry once if malformed
+          if ! python3 -c "import json; json.load(open('/tmp/articles/top10.json'))" 2>/dev/null; then
+            echo "::warning::Stage 1 produced malformed top10.json — dumping first 1000 chars:"
+            head -c 1000 /tmp/articles/top10.json 2>/dev/null || echo "(file missing)"
+            echo ""
+            echo "Retrying Stage 1..."
+            if ! claude -p --model haiku --output-format json "You are triaging articles for a daily reading digest. Your ONLY job is to pick the top 10 most interesting articles.
+
+          Read /tmp/articles/metadata.json. It contains article metadata (title, author, summary, word_count, category, source_url, published_date, id).
+
+          Pick the top 10 articles ranked by novelty, depth, and relevance. Ignore articles with word_count < 300 or word_count > 15000 (books/very long reads don't belong in a daily digest).
+
+          Write to /tmp/articles/top10.json with this exact structure:
+          [
+            {\"id\": \"...\", \"title\": \"...\", \"author\": \"...\", \"word_count\": N, \"reading_time\": \"...\", \"category\": \"...\", \"source_url\": \"...\", \"summary\": \"...\", \"rank\": 1},
+            ...
+          ]
+
+          Rules:
+          - Exactly 10 articles (or fewer if less than 10 available).
+          - rank 1 = most interesting. Novelty and depth beat recency.
+          - Output ONLY the JSON file. Nothing else." --allowedTools "Read,Write" > /tmp/stage1_retry_output.json 2>&1; then
+              echo "::error::Stage 1 retry also failed. Output:"
+              cat /tmp/stage1_retry_output.json 2>/dev/null || echo "(no output file)"
+              exit 1
+            fi
+            # Verify retry result
+            if ! python3 -c "import json; json.load(open('/tmp/articles/top10.json'))" 2>/dev/null; then
+              echo "::error::Stage 1 retry produced malformed JSON. First 1000 chars:"
+              head -c 1000 /tmp/articles/top10.json 2>/dev/null || echo "(file missing)"
+              exit 1
+            fi
+            echo "Stage 1 retry succeeded"
+          fi
+
+          # Show selected articles
           python3 -c "
           import json
           top10 = json.load(open('/tmp/articles/top10.json'))
