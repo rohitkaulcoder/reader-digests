@@ -442,6 +442,46 @@ jobs:
 
           echo "Stage 3 complete"
 
+          # Fallback: if Claude didn't create the digest file via Write tool, extract from JSON output
+          if [ ! -f "_digests/digest-${TODAY}.md" ]; then
+            echo "::warning::Stage 3 did not create digest file via Write tool — extracting from JSON output"
+            mkdir -p _digests
+            python3 -c "
+          import json, sys, os
+          today = os.environ.get('TODAY', '$(date +%Y-%m-%d)')
+          month_day = os.environ.get('MONTH_DAY', '$(date +\"%B %d, %Y\")')
+          try:
+              data = json.load(open('/tmp/stage3_output.json'))
+              # Extract text result from JSON output
+              result_text = data.get('result', '')
+              if not result_text:
+                  print('No result field in stage 3 output')
+                  sys.exit(1)
+              # Add front matter if not present
+              if not result_text.startswith('---'):
+                  front_matter = f'---\nlayout: digest\ntitle: \"Reader Digest — {month_day}\"\ndate: {today}\n---\n\n'
+                  result_text = front_matter + result_text
+              with open(f'_digests/digest-{today}.md', 'w') as f:
+                  f.write(result_text)
+              print(f'Wrote fallback digest to _digests/digest-{today}.md')
+          except Exception as e:
+              print(f'Fallback extraction failed: {e}')
+              # Last resort: use analyzed.md directly
+              if os.path.exists('/tmp/articles/analyzed.md'):
+                  content = open('/tmp/articles/analyzed.md').read()
+                  if content.strip():
+                      front_matter = f'---\nlayout: digest\ntitle: \"Reader Digest — {month_day}\"\ndate: {today}\n---\n\n'
+                      with open(f'_digests/digest-{today}.md', 'w') as f:
+                          f.write(front_matter + content)
+                      print(f'Wrote raw analyzed.md as fallback digest')
+                  else:
+                      print('analyzed.md is empty — no digest to write')
+                      sys.exit(1)
+              else:
+                  sys.exit(1)
+          " || echo "::error::Could not extract digest from stage 3 output"
+          fi
+
           # Calculate total cost across all stages
           python3 -c "
           import json, os
