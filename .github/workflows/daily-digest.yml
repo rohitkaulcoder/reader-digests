@@ -359,8 +359,9 @@ jobs:
           - Scale arguments to length: 5-min article → 2-3, 10-min → 5, 20-min → 10.
           - Include specific numbers, names, and evidence. No vague summaries.'''
 
-              # Retry loop with exponential backoff for transient API errors (529, etc.)
+              # Try Sonnet with retries, fall back to Haiku if Sonnet is unavailable
               succeeded = False
+              used_model = 'sonnet'
               for attempt in range(MAX_RETRIES):
                   try:
                       result = subprocess.run(
@@ -384,7 +385,7 @@ jobs:
                           cc = u.get('cache_creation_input_tokens', 0)
                           cost = (inp / 1e6) * 3.0 + (out / 1e6) * 15.0 + (cr / 1e6) * 0.30 + (cc / 1e6) * 3.75
                           total_cost += cost
-                          print(f'    Done: {inp:,} in / {out:,} out | ${cost:.3f}')
+                          print(f'    Done (sonnet): {inp:,} in / {out:,} out | ${cost:.3f}')
                       except:
                           print(f'    Done (could not parse stats)')
 
@@ -410,6 +411,44 @@ jobs:
                           time.sleep(wait)
                       elif not is_overloaded:
                           break  # Non-transient error, don't retry
+
+              # Haiku fallback if Sonnet failed after all retries
+              if not succeeded:
+                  print(f'    Sonnet unavailable — falling back to Haiku...')
+                  used_model = 'haiku'
+                  try:
+                      result = subprocess.run(
+                          ['claude', '-p', '--model', 'haiku', '--output-format', 'json',
+                           prompt, '--allowedTools', 'Read,Write'],
+                          capture_output=True, text=True, timeout=300
+                      )
+                  except subprocess.TimeoutExpired:
+                      print(f'    Haiku fallback also timed out — skipping')
+
+                  if result.returncode == 0:
+                      try:
+                          output = json.loads(result.stdout)
+                          u = output.get('usage', {})
+                          inp = u.get('input_tokens', 0)
+                          out = u.get('output_tokens', 0)
+                          cost = (inp / 1e6) * 0.80 + (out / 1e6) * 4.0
+                          total_cost += cost
+                          print(f'    Done (haiku fallback): {inp:,} in / {out:,} out | ${cost:.3f}')
+                      except:
+                          print(f'    Done via haiku (could not parse stats)')
+
+                      analysis_path = f'/tmp/articles/{doc_id}_analysis.md'
+                      if os.path.exists(analysis_path):
+                          with open(analysis_path) as af:
+                              analysis = af.read()
+                          with open('/tmp/articles/analyzed.md', 'a') as f:
+                              f.write(analysis + '\n\n')
+                          succeeded = True
+                      else:
+                          print(f'    WARNING: haiku fallback did not create analysis file')
+                  else:
+                      errmsg = result.stderr[:200] if result.stderr else result.stdout[:200]
+                      print(f'    Haiku fallback also FAILED: {errmsg[:120]}')
 
               if succeeded:
                   success_count += 1
