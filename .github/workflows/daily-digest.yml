@@ -398,8 +398,15 @@ jobs:
                               f.write(analysis + '\n\n')
                           succeeded = True
                       else:
-                          print(f'    WARNING: analysis file not created')
-                          succeeded = True  # Claude ran OK, just didn't write file
+                          # Fallback: extract from JSON result field
+                          result_text = output.get('result', '') if output else ''
+                          if result_text and len(result_text) > 100:
+                              with open('/tmp/articles/analyzed.md', 'a') as f:
+                                  f.write(result_text + '\n\n')
+                              print(f'    (extracted from result field — Write tool not used)')
+                              succeeded = True
+                          else:
+                              print(f'    WARNING: analysis file not created and no usable result text')
                       break
                   else:
                       errmsg = result.stderr[:200] if result.stderr else result.stdout[:200]
@@ -445,7 +452,15 @@ jobs:
                               f.write(analysis + '\n\n')
                           succeeded = True
                       else:
-                          print(f'    WARNING: haiku fallback did not create analysis file')
+                          # Fallback: extract from JSON result field
+                          result_text = output.get('result', '') if output else ''
+                          if result_text and len(result_text) > 100:
+                              with open('/tmp/articles/analyzed.md', 'a') as f:
+                                  f.write(result_text + '\n\n')
+                              print(f'    (haiku: extracted from result field — Write tool not used)')
+                              succeeded = True
+                          else:
+                              print(f'    WARNING: haiku fallback did not create analysis file and no usable result')
                   else:
                       errmsg = result.stderr[:200] if result.stderr else result.stdout[:200]
                       print(f'    Haiku fallback also FAILED: {errmsg[:120]}')
