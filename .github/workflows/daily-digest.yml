@@ -297,10 +297,12 @@ jobs:
         run: |
           # Process each article in its own claude -p call (context resets between articles)
           python3 << 'PYTHON_SCRIPT'
-          import json, subprocess, os
+          import json, subprocess, os, time
 
           top10 = json.load(open('/tmp/articles/top10.json'))
           total_cost = 0
+          success_count = 0
+          MAX_RETRIES = 3
 
           # Initialize the analyzed output file
           with open('/tmp/articles/analyzed.md', 'w') as f:
@@ -357,45 +359,66 @@ jobs:
           - Scale arguments to length: 5-min article → 2-3, 10-min → 5, 20-min → 10.
           - Include specific numbers, names, and evidence. No vague summaries.'''
 
-              try:
-                  result = subprocess.run(
-                      ['claude', '-p', '--model', 'sonnet', '--output-format', 'json',
-                       prompt, '--allowedTools', 'Read,Write'],
-                      capture_output=True, text=True, timeout=300
-                  )
-              except subprocess.TimeoutExpired:
-                  print(f'    TIMEOUT (300s) — skipping')
-                  continue
-
-              if result.returncode == 0:
+              # Retry loop with exponential backoff for transient API errors (529, etc.)
+              succeeded = False
+              for attempt in range(MAX_RETRIES):
                   try:
-                      output = json.loads(result.stdout)
-                      u = output.get('usage', {})
-                      inp = u.get('input_tokens', 0)
-                      out = u.get('output_tokens', 0)
-                      cr = u.get('cache_read_input_tokens', 0)
-                      cc = u.get('cache_creation_input_tokens', 0)
-                      cost = (inp / 1e6) * 3.0 + (out / 1e6) * 15.0 + (cr / 1e6) * 0.30 + (cc / 1e6) * 3.75
-                      total_cost += cost
-                      print(f'    Done: {inp:,} in / {out:,} out | ${cost:.3f}')
-                  except:
-                      print(f'    Done (could not parse stats)')
+                      result = subprocess.run(
+                          ['claude', '-p', '--model', 'sonnet', '--output-format', 'json',
+                           prompt, '--allowedTools', 'Read,Write'],
+                          capture_output=True, text=True, timeout=300
+                      )
+                  except subprocess.TimeoutExpired:
+                      print(f'    TIMEOUT (300s) attempt {attempt+1}/{MAX_RETRIES}')
+                      if attempt < MAX_RETRIES - 1:
+                          time.sleep(30 * (attempt + 1))
+                      continue
 
-                  # Append analysis to combined file
-                  analysis_path = f'/tmp/articles/{doc_id}_analysis.md'
-                  if os.path.exists(analysis_path):
-                      with open(analysis_path) as af:
-                          analysis = af.read()
-                      with open('/tmp/articles/analyzed.md', 'a') as f:
-                          f.write(analysis + '\n\n')
+                  if result.returncode == 0:
+                      try:
+                          output = json.loads(result.stdout)
+                          u = output.get('usage', {})
+                          inp = u.get('input_tokens', 0)
+                          out = u.get('output_tokens', 0)
+                          cr = u.get('cache_read_input_tokens', 0)
+                          cc = u.get('cache_creation_input_tokens', 0)
+                          cost = (inp / 1e6) * 3.0 + (out / 1e6) * 15.0 + (cr / 1e6) * 0.30 + (cc / 1e6) * 3.75
+                          total_cost += cost
+                          print(f'    Done: {inp:,} in / {out:,} out | ${cost:.3f}')
+                      except:
+                          print(f'    Done (could not parse stats)')
+
+                      # Append analysis to combined file
+                      analysis_path = f'/tmp/articles/{doc_id}_analysis.md'
+                      if os.path.exists(analysis_path):
+                          with open(analysis_path) as af:
+                              analysis = af.read()
+                          with open('/tmp/articles/analyzed.md', 'a') as f:
+                              f.write(analysis + '\n\n')
+                          succeeded = True
+                      else:
+                          print(f'    WARNING: analysis file not created')
+                          succeeded = True  # Claude ran OK, just didn't write file
+                      break
                   else:
-                      print(f'    WARNING: analysis file not created')
-              else:
-                  errmsg = result.stderr[:200] if result.stderr else result.stdout[:200]
-                  print(f'    FAILED (exit {result.returncode}): {errmsg}')
-                  # Don't crash — continue to next article
+                      errmsg = result.stderr[:200] if result.stderr else result.stdout[:200]
+                      is_overloaded = '529' in errmsg or 'overloaded' in errmsg
+                      print(f'    FAILED attempt {attempt+1}/{MAX_RETRIES} (exit {result.returncode}): {errmsg[:120]}')
+                      if is_overloaded and attempt < MAX_RETRIES - 1:
+                          wait = 60 * (attempt + 1)  # 60s, 120s
+                          print(f'    API overloaded — waiting {wait}s before retry...')
+                          time.sleep(wait)
+                      elif not is_overloaded:
+                          break  # Non-transient error, don't retry
 
-          print(f'\nStage 2 total cost: ${total_cost:.2f}')
+              if succeeded:
+                  success_count += 1
+
+          print(f'\nStage 2: {success_count}/{len(top10)} articles analyzed, cost: ${total_cost:.2f}')
+          if success_count == 0:
+              print('::error::Stage 2 produced zero analyses — aborting pipeline')
+              import sys
+              sys.exit(1)
           with open('/tmp/stage2_cost.txt', 'w') as f:
               f.write(f'Stage 2 (Sonnet x{len(top10)}): ${total_cost:.2f}')
           PYTHON_SCRIPT
@@ -454,8 +477,13 @@ jobs:
               data = json.load(open('/tmp/stage3_output.json'))
               # Extract text result from JSON output
               result_text = data.get('result', '')
-              if not result_text:
-                  print('No result field in stage 3 output')
+              if not result_text or len(result_text) < 500:
+                  print(f'Stage 3 result too short ({len(result_text)} chars) — likely not a real digest')
+                  sys.exit(1)
+              # Reject if Claude is just complaining about empty input
+              complaint_phrases = ['appears to be empty', 'file is empty', 'no content', 'Could you provide']
+              if any(p in result_text for p in complaint_phrases):
+                  print('Stage 3 result is a complaint, not a digest — skipping')
                   sys.exit(1)
               # Add front matter if not present
               if not result_text.startswith('---'):
@@ -469,13 +497,13 @@ jobs:
               # Last resort: use analyzed.md directly
               if os.path.exists('/tmp/articles/analyzed.md'):
                   content = open('/tmp/articles/analyzed.md').read()
-                  if content.strip():
+                  if content.strip() and len(content.strip()) > 200:
                       front_matter = f'---\nlayout: digest\ntitle: \"Reader Digest — {month_day}\"\ndate: {today}\n---\n\n'
                       with open(f'_digests/digest-{today}.md', 'w') as f:
                           f.write(front_matter + content)
                       print(f'Wrote raw analyzed.md as fallback digest')
                   else:
-                      print('analyzed.md is empty — no digest to write')
+                      print('analyzed.md is empty or too short — no digest to write')
                       sys.exit(1)
               else:
                   sys.exit(1)
