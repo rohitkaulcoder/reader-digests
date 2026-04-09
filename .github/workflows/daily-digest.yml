@@ -187,75 +187,101 @@ jobs:
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          if ! claude -p --model haiku --output-format json "You are triaging articles for a daily reading digest. Your ONLY job is to pick the top 10 most interesting articles.
+          # Build prompt file with metadata inlined (avoids Read tool reliability issues — Haiku was not reading the file)
+          python3 << 'BUILD_PROMPT'
+          import json
 
-          Read /tmp/articles/metadata.json. It contains article metadata (title, author, summary, word_count, category, source_url, published_date, id).
+          with open('/tmp/articles/metadata.json') as f:
+              metadata = f.read()
 
-          Pick the top 10 articles ranked by novelty, depth, and relevance. Ignore articles with word_count < 300 or word_count > 15000 (books/very long reads don't belong in a daily digest).
+          prompt = f"""You are triaging articles for a daily reading digest. Your ONLY job is to pick the top 10 most interesting articles.
 
-          Write to /tmp/articles/top10.json with this exact structure:
+          Here are the articles (JSON metadata):
+
+          {metadata}
+
+          Pick the top 10 articles ranked by novelty, depth, and relevance. Ignore articles with word_count < 300 or word_count > 15000.
+
+          Output ONLY a JSON array with this exact structure (no other text):
           [
-            {\"id\": \"...\", \"title\": \"...\", \"author\": \"...\", \"word_count\": N, \"reading_time\": \"...\", \"category\": \"...\", \"source_url\": \"...\", \"summary\": \"...\", \"rank\": 1},
+            {{"id": "...", "title": "...", "author": "...", "word_count": N, "reading_time": "...", "category": "...", "source_url": "...", "summary": "...", "rank": 1}},
             ...
           ]
 
           Rules:
           - Exactly 10 articles (or fewer if less than 10 available).
           - rank 1 = most interesting. Novelty and depth beat recency.
-          - Output ONLY the JSON file. Nothing else." --allowedTools "Read,Write" > /tmp/stage1_output.json 2>&1; then
-            echo "::error::Stage 1 (triage) failed. Claude output:"
-            cat /tmp/stage1_output.json 2>/dev/null || echo "(no output file)"
-            if [ -f /tmp/articles/top10.json ]; then
-              echo "::warning::top10.json exists but stage failed. First 1000 chars:"
-              head -c 1000 /tmp/articles/top10.json
-            fi
-            exit 1
-          fi
+          - Output ONLY the JSON array. No markdown fences, no explanation."""
 
-          echo "Stage 1 complete"
-          python3 -c "
-          import json
-          data = json.load(open('/tmp/stage1_output.json'))
+          with open('/tmp/stage1_prompt.txt', 'w') as f:
+              f.write(prompt)
+          print(f'Built prompt: {len(prompt)} chars with {len(metadata)} chars of metadata')
+          BUILD_PROMPT
+
+          run_stage1() {
+            local output_file="$1"
+            cat /tmp/stage1_prompt.txt | claude -p --model haiku --output-format json > "$output_file" 2>&1
+            local exit_code=$?
+
+            if [ $exit_code -ne 0 ]; then
+              echo "::error::Stage 1 claude call failed (exit $exit_code)"
+              cat "$output_file" 2>/dev/null
+              return 1
+            fi
+
+            # Extract the result text from JSON output and parse as JSON array
+            python3 -c "
+          import json, sys, re
+
+          with open('$output_file') as f:
+              data = json.load(f)
+
           u = data.get('usage', {})
           inp, out = u.get('input_tokens', 0), u.get('output_tokens', 0)
           cost = (inp / 1e6) * 0.80 + (out / 1e6) * 4.0
           print(f'Stage 1 (Haiku): {inp:,} in / {out:,} out | \${cost:.4f}')
-          " || echo "Could not parse stage 1 stats"
 
-          # Verify top10.json is valid JSON; retry once if malformed
-          if ! python3 -c "import json; json.load(open('/tmp/articles/top10.json'))" 2>/dev/null; then
-            echo "::warning::Stage 1 produced malformed top10.json — dumping first 1000 chars:"
-            head -c 1000 /tmp/articles/top10.json 2>/dev/null || echo "(file missing)"
-            echo ""
-            echo "Retrying Stage 1..."
-            if ! claude -p --model haiku --output-format json "You are triaging articles for a daily reading digest. Your ONLY job is to pick the top 10 most interesting articles.
+          result_text = data.get('result', '')
+          if not result_text:
+              print('::error::No result text in stage 1 output')
+              sys.exit(1)
 
-          Read /tmp/articles/metadata.json. It contains article metadata (title, author, summary, word_count, category, source_url, published_date, id).
+          # Strip markdown fences if present
+          result_text = re.sub(r'\`\`\`json\s*', '', result_text.strip())
+          result_text = re.sub(r'\s*\`\`\`', '', result_text.strip())
 
-          Pick the top 10 articles ranked by novelty, depth, and relevance. Ignore articles with word_count < 300 or word_count > 15000 (books/very long reads don't belong in a daily digest).
+          try:
+              top10 = json.loads(result_text)
+          except json.JSONDecodeError as e:
+              print(f'::error::Stage 1 result is not valid JSON: {e}')
+              print(f'First 500 chars: {result_text[:500]}')
+              sys.exit(1)
 
-          Write to /tmp/articles/top10.json with this exact structure:
-          [
-            {\"id\": \"...\", \"title\": \"...\", \"author\": \"...\", \"word_count\": N, \"reading_time\": \"...\", \"category\": \"...\", \"source_url\": \"...\", \"summary\": \"...\", \"rank\": 1},
-            ...
-          ]
+          if not isinstance(top10, list) or len(top10) == 0:
+              print('::error::Stage 1 result is not a non-empty list')
+              sys.exit(1)
 
-          Rules:
-          - Exactly 10 articles (or fewer if less than 10 available).
-          - rank 1 = most interesting. Novelty and depth beat recency.
-          - Output ONLY the JSON file. Nothing else." --allowedTools "Read,Write" > /tmp/stage1_retry_output.json 2>&1; then
-              echo "::error::Stage 1 retry also failed. Output:"
-              cat /tmp/stage1_retry_output.json 2>/dev/null || echo "(no output file)"
+          # Validate each entry has an id
+          for entry in top10:
+              if 'id' not in entry:
+                  print(f'::error::Stage 1 entry missing id field: {entry}')
+                  sys.exit(1)
+
+          json.dump(top10, open('/tmp/articles/top10.json', 'w'), indent=2, ensure_ascii=False)
+          print(f'Wrote {len(top10)} articles to top10.json')
+          "
+          }
+
+          # Try up to 2 times
+          if ! run_stage1 /tmp/stage1_output.json; then
+            echo "::warning::Stage 1 first attempt failed, retrying..."
+            if ! run_stage1 /tmp/stage1_retry_output.json; then
+              echo "::error::Stage 1 failed after retry"
               exit 1
             fi
-            # Verify retry result
-            if ! python3 -c "import json; json.load(open('/tmp/articles/top10.json'))" 2>/dev/null; then
-              echo "::error::Stage 1 retry produced malformed JSON. First 1000 chars:"
-              head -c 1000 /tmp/articles/top10.json 2>/dev/null || echo "(file missing)"
-              exit 1
-            fi
-            echo "Stage 1 retry succeeded"
           fi
+
+          echo "Stage 1 complete"
 
           # Show selected articles
           python3 -c "
